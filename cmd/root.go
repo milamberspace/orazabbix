@@ -18,10 +18,8 @@ import (
 	homedir "github.com/mitchellh/go-homedir"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
-	"log"
-	"orazabbix/orametrics"
+	"github.com/mrsrvman/orazabbix/orametrics"
 	"os"
-	"strings"
 	goflag "flag"
 )
 
@@ -31,6 +29,8 @@ var (
 	zabbixHost       string
 	zabbixPort       int
 	hostName         string
+	localFile	bool
+	useRAC		bool
 )
 
 // RootCmd represents the base command when called without any subcommands
@@ -45,11 +45,7 @@ var RootCmd = &cobra.Command{
 
 func runCmd(cmd *cobra.Command, args []string) {
 	goflag.CommandLine.Parse([]string{})
-	//if versionFlag := getFlagBoolPtr(cmd, "version"); versionFlag != nil {
-	//	fmt.Println("OraZabbix v1.0.0")
-	//} else {
-		orametrics.Init(connectionString, zabbixHost, zabbixPort, hostName)
-	//}
+	orametrics.Init(connectionString, zabbixHost, zabbixPort, hostName,localFile,useRAC)
 }
 
 // Execute adds all child commands to the root command sets flags appropriately.
@@ -62,41 +58,23 @@ func Execute() {
 }
 
 func init() {
-	cobra.OnInitialize()
+	cobra.OnInitialize(initConfig)
 
 	// Here you will define your flags and configuration settings.
 	// Cobra supports persistent flags, which, if defined here,
 	// will be global for your application.
-	//RootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (default is $HOME/.orazabbix.yaml)")
+	RootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (default is $HOME/.orazabbix.yaml)")
 
 	// Cobra also supports local flags, which will only run
 	// when this action is called directly.
-	//RootCmd.Flags().BoolP("toggle", "t", false, "Help message for toggle")
 	//RootCmd.Flags().BoolP("version", "v", false, "Prints version information")
 	RootCmd.Flags().StringVarP(&connectionString, "connectionstring", "c", "system/oracle@localhost:1521/xe", "ConnectionString to the Database, Format: username/password@ip:port/sid")
 	RootCmd.Flags().StringVarP(&zabbixHost, "zabbix", "z", "localhost", "Zabbix Server/Proxy Hostname or IP address")
 	RootCmd.Flags().IntVarP(&zabbixPort, "port", "p", 10051, "Zabbix Server/Proxy Port")
 	RootCmd.Flags().StringVarP(&hostName, "host", "H", "server1", "Hostname of the monitored object in zabbix server")
+	RootCmd.Flags().BoolVarP(&localFile, "local", "l", false, "Do not send information to the server. Use local file")
+	RootCmd.Flags().BoolVarP(&useRAC, "RAC", "R", false, "Query for RAC configuration")
 	RootCmd.PersistentFlags().AddGoFlagSet(goflag.CommandLine)
-}
-
-func getFlagBoolPtr(cmd *cobra.Command, flag string) *bool {
-	f := cmd.Flags().Lookup(flag)
-	if f == nil {
-		log.Printf("Flag accessed but not defined for command %s: %s", cmd.Name(), flag)
-	}
-	// Check if flag was not set at all.
-	if !f.Changed && f.DefValue == f.Value.String() {
-		return nil
-	}
-	var ret bool
-	// Caseless compare.
-	if strings.ToLower(f.Value.String()) == "true" {
-		ret = true
-	} else {
-		ret = false
-	}
-	return &ret
 }
 
 // initConfig reads in config file and ENV variables if set.

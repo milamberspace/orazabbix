@@ -2,13 +2,16 @@ package orametrics
 
 import (
 	"database/sql"
-	//	"encoding/json"
+	"encoding/json"
 	"fmt"
 	"strconv"
 	"time"
-
 	"github.com/golang/glog"
-	_ "gopkg.in/rana/ora.v4"
+	_ "github.com/mattn/go-oci8"
+	//_ "gopkg.in/rana/ora.v4"
+	"strings"
+	"os"
+	"io/ioutil"
 )
 
 type tsBytes struct {
@@ -47,46 +50,67 @@ type instance struct {
 	DATABASE_TYPE    string         `json:"DATABASE_TYPE"`
 }
 
-func Init(connectionString string, zabbixHost string, zabbixPort int, hostName string) {
+var fileName string = "/tmp/orazabbix.json"
+
+func Init(connectionString string, zabbixHost string, zabbixPort int, hostName string, localFile bool, useRAC bool) {
+	var query string
 	start := time.Now()
 	defer glog.Flush()
-	db, err := sql.Open("ora", connectionString)
+
+	db, err := sql.Open("oci8", connectionString)
 	if err != nil {
-		glog.Fatal("Connection Failed!", err)
+		glog.Fatal("Connection Failed! ", err)
 		return
 	}
 	defer db.Close()
 
 	if err = db.Ping(); err != nil {
-		glog.Fatal("Error connecting to the database:", err)
+		glog.Fatal("Error connecting to the database: ", err)
 		return
 	}
+
+	_ , err = db.Exec(preset_role1)
+	if err != nil {
+		glog.Error("Error set role: ", err)
+	}
+
 	zabbixData := make(map[string]string)
 	for k, v := range queries {
 		//	zabbixData[k] = runQuery(v, db)
+		if !useRAC{
+		    switch k {
+			case "waits_sqlnet":
+			    glog.Info("Skipping query for non-RAC")
+			    continue
+			case "blocking_sessions":
+			    glog.Info("Skipping query for non-RAC")
+			    continue
+			case "blocking_sessions_full":
+			    glog.Info("Skipping query for non-RAC")
+			    continue
+			default:
+		    }
+		}
+		query = convertQuery(v,useRAC)
 		var rows *sql.Rows
-		rows, err := db.Query(v)
-		//glog.Info("zquery=", v)
+		rows, err := db.Query(query)
 		if err != nil {
-			glog.Error("Error fetching addition", err)
-			return
+			glog.Info("zquery=", query)
+			glog.Error("Error fetching addition: ", err)
+			continue
 		}
 		defer rows.Close()
 
 		for rows.Next() {
-
 			var res string
 			err := rows.Scan(&res)
 			if err != nil {
-				glog.Info("ERR scan=", err)
 				var floatRes float64
 				err := rows.Scan(&floatRes)
 				if err != nil {
-					glog.Info("ERR scan float=", err)
 					var intRes int64
 					err := rows.Scan(&intRes)
 					if err != nil {
-						glog.Info("ERR scan int=", err)
 						zabbixData[k] = "0"
 					} else {
 						zabbixData[k] = fmt.Sprintf("%b", intRes)
@@ -97,10 +121,9 @@ func Init(connectionString string, zabbixHost string, zabbixPort int, hostName s
 					glog.Info("zdata float key=", k, " data=", floatRes)
 				}
 			} else {
-				zabbixData[k] = res
+				zabbixData[k] = strings.TrimSpace(res)
 				glog.Info("zdata string key=", k, " data=", res)
 			}
-
 		}
 	}
 	if zabbixData["pool_dict_cache"] == "" {
@@ -113,11 +136,12 @@ func Init(connectionString string, zabbixHost string, zabbixPort int, hostName s
 		zabbixData["pool_sql_area"] = "0"
 	}
 	//glog.Info("zabbixData:", zabbixData)
-	//discoveryData := make(map[string][]string)
 	discoveryData := make(map[string]string)
 	for k, v := range discoveryQueries {
+		query = convertQuery(v,useRAC)
+		glog.Info("query=", query)
 		if k == "tablespaces" {
-			result := runDiscoveryQuery(v, db)
+			result, _ := runDiscoveryQuery(query, db)
 			var fix string = "{\"data\":["
 			count := 1
 			len := len(result)
@@ -133,7 +157,7 @@ func Init(connectionString string, zabbixHost string, zabbixPort int, hostName s
 			discoveryData[k] = fix
 		}
 		if k == "diskgroups" {
-			resultd := runDiscoveryQuery(v, db)
+			resultd, _ := runDiscoveryQuery(query, db)
 			var fixd string = "{\"data\":["
 			countd := 1
 			lend := len(resultd)
@@ -149,7 +173,7 @@ func Init(connectionString string, zabbixHost string, zabbixPort int, hostName s
 			discoveryData[k] = fixd
 		}
 		if k == "instances" {
-			resultI := runDiscoveryQuery(v, db)
+			resultI, _ := runDiscoveryQuery(query, db)
 			var fixd string = "{\"data\":["
 			countI := 1
 			lend := len(resultI)
@@ -165,19 +189,20 @@ func Init(connectionString string, zabbixHost string, zabbixPort int, hostName s
 			discoveryData[k] = fixd
 		}
 	}
-	//j := discoveryData["tablespaces"]
-	//d := discoveryData["diskgroups"]
-
-	ts_usage_bytes := runTsBytesDiscoveryQuery(ts_usage_bytes, db)
-	ts_usage_pct := runTsBytesDiscoveryQuery(ts_usage_pct, db)
-	diskGroupsMetrics := runDiskGroupsMetrics(diskgroup_metrics, db)
-	instanceMetrics := runInstanceMetrics(instance_metrics, db)
+	ts_usage_bytes, _ := runTsBytesDiscoveryQuery(convertQuery(ts_usage_bytes,useRAC), db)
+	ts_maxsize_bytes, _ := runTsBytesDiscoveryQuery(convertQuery(ts_maxsize_bytes,useRAC), db)
+	ts_usage_pct, _ := runTsBytesDiscoveryQuery(convertQuery(ts_usage_pct,useRAC), db)
+	diskGroupsMetrics, _ := runDiskGroupsMetrics(convertQuery(diskgroup_metrics,useRAC), db)
+	instanceMetrics, _ := runInstanceMetrics(convertQuery(instance_metrics,useRAC), db)
 	discoveryMetrics := make(map[string]string)
 	for _, v := range ts_usage_bytes {
-		discoveryMetrics[`ts_usage_bytes[`+v.Ts+`]`] = v.Bytes
+		discoveryMetrics[`ts_usage_bytes[`+v.Ts+`]`] = strings.TrimSpace(v.Bytes)
+	}
+	for _, v := range ts_maxsize_bytes {
+		discoveryMetrics[`ts_maxsize_bytes[`+v.Ts+`]`] = strings.TrimSpace(v.Bytes)
 	}
 	for _, v := range ts_usage_pct {
-		discoveryMetrics[`ts_usage_pct[`+v.Ts+`]`] = v.Bytes
+		discoveryMetrics[`ts_usage_pct[`+v.Ts+`]`] = strings.TrimSpace(v.Bytes)
 	}
 	for _, v := range diskGroupsMetrics {
 		bytes, _ := strconv.Atoi(v.UsableFileMB)
@@ -187,7 +212,7 @@ func Init(connectionString string, zabbixHost string, zabbixPort int, hostName s
 		discoveryMetrics[`offline_disks[`+v.Dg+`]`] = v.OfflineDisks
 	}
 	for _, v := range instanceMetrics {
-		discoveryMetrics[`INST_ID[`+v.INSTANCE_NAME+`]`] = v.INST_ID
+		discoveryMetrics[`INST_ID[`+v.INSTANCE_NAME+`]`] = v.INSTANCE_NUMBER
 		discoveryMetrics[`INSTANCE_NUMBER[`+v.INSTANCE_NAME+`]`] = v.INSTANCE_NUMBER
 		discoveryMetrics[`HOST_NAME[`+v.INSTANCE_NAME+`]`] = v.HOST_NAME
 		discoveryMetrics[`VERSION[`+v.INSTANCE_NAME+`]`] = v.VERSION
@@ -221,100 +246,115 @@ func Init(connectionString string, zabbixHost string, zabbixPort int, hostName s
 	for k, v := range discoveryData {
 		zabbixData[k] = v
 	}
-	//send(discoveryMetrics, zabbixHost, zabbixPort, hostName)
-	glog.Info("zabbixData Combined: ", zabbixData)
-	send(zabbixData, zabbixHost, zabbixPort, hostName)
-	//sendD(j,"tablespaces", zabbixHost, zabbixPort, hostName)
-	//sendD(d,"diskgroups",zabbixHost,zabbixPort,hostName)
+	if !localFile {
+	    glog.Info("zabbixData Combined: ", zabbixData)
+	    send(zabbixData, zabbixHost, zabbixPort, hostName)
+	    //j := discoveryData["tablespaces"]
+	    //d := discoveryData["diskgroups"]
+	    //sendD(j,"tablespaces", zabbixHost, zabbixPort, hostName)
+	    //sendD(d,"diskgroups",zabbixHost,zabbixPort,hostName)
+	}else{
+		tes, err := json.MarshalIndent(zabbixData, "", " ")
+		if err != nil {
+			fmt.Println(err)
+		}
+		fmt.Println(string(tes))
+		writeFile (fileName,tes)
+	}
 	glog.Info(time.Since(start))
-	//	tes, err := json.Marshal(discoveryMetrics)
-	//	if err != nil {
-	//		fmt.Println(err)
-	//	}
-	//	fmt.Println(string(tes))
 }
-func runDiscoveryQuery(query string, db *sql.DB) []string {
+
+func writeFile (filename string, js []byte) (err error) {
+
+    err = ioutil.WriteFile(filename+".tmp", js, 0644)
+    if err != nil {
+	return err
+    }
+    if err = os.Rename(filename+".tmp", filename); err != nil {
+	return err
+    }
+    return nil
+}
+
+func runDiscoveryQuery(query string, db *sql.DB) (res []string, err error) {
+	var result []string
 	rows, err := db.Query(query)
 	if err != nil {
-		glog.Error("Error fetching addition", err)
-		var er []string
-		er = append(er, err.Error())
-		return er
+		glog.Error("Error fetching addition: ", err, query)
+		return result,err
 	}
 	defer rows.Close()
-	var result []string
+
 	for rows.Next() {
 		var res string
 		rows.Scan(&res)
-		result = append(result, res)
+		result = append(result, strings.TrimSpace(res))
 	}
-	return result
+	return result,nil
 }
 
-func runQuery(query string, db *sql.DB) string {
+func runQuery(query string, db *sql.DB) (res string, err error) {
+	var result string
 	rows, err := db.Query(query)
 	if err != nil {
-		glog.Error("Error fetching addition", err)
-		return err.Error()
+		glog.Error("Error fetching addition: ", err, query)
+		return "",err
 	}
 	defer rows.Close()
-	var res string
+
 	for rows.Next() {
-		rows.Scan(&res)
+		rows.Scan(&result)
 	}
-	return res
+	return  strings.TrimSpace(result),nil
 }
 
-func runTsBytesDiscoveryQuery(query string, db *sql.DB) []tsBytes {
+func runTsBytesDiscoveryQuery(query string, db *sql.DB) (res []tsBytes, err error) {
+	var result []tsBytes
 	rows, err := db.Query(query)
 	if err != nil {
-		glog.Error("Error fetching addition", err)
-		var er []string
-		er = append(er, err.Error())
-		//return er
+		glog.Error("Error fetching addition: ", err, query)
+		return result,err
 	}
 	defer rows.Close()
-	var result []tsBytes
+
 	for rows.Next() {
 		var res tsBytes
 		rows.Scan(&res.Ts, &res.Bytes)
-
 		result = append(result, res)
 	}
-	return result
+	return result,nil
 }
 
-func runDiskGroupsMetrics(query string, db *sql.DB) []diskgroups {
+func runDiskGroupsMetrics(query string, db *sql.DB) (res []diskgroups, err error) {
+	var result []diskgroups
 	rows, err := db.Query(query)
 	if err != nil {
-		glog.Error("Error fetching addition", err)
-		var er []string
-		er = append(er, err.Error())
-		//return er
+		glog.Error("Error fetching addition: ", err, query)
+		return result,err
 	}
 	defer rows.Close()
-	var result []diskgroups
+
 	for rows.Next() {
 		var res diskgroups
 		rows.Scan(&res.Dg, &res.UsableFileMB, &res.OfflineDisks)
 		result = append(result, res)
 	}
-	return result
+	return result,nil
 }
 
-func runInstanceMetrics(query string, db *sql.DB) []instance {
+func runInstanceMetrics(query string, db *sql.DB) (res []instance, err error) {
+	var result []instance
 	rows, err := db.Query(query)
 	if err != nil {
-		glog.Error("Error fetching addition", err)
-		var er []string
-		er = append(er, err.Error())
-		//return er
+		glog.Error("Error fetching addition: ", err, query)
+		return result,err
 	}
 	defer rows.Close()
-	var result []instance
+
 	for rows.Next() {
 		var res instance
-		err := rows.Scan(&res.INST_ID, &res.INSTANCE_NUMBER, &res.INSTANCE_NAME, &res.HOST_NAME, &res.VERSION, &res.STARTUP_TIME,
+//		err := rows.Scan(&res.INST_ID, &res.INSTANCE_NUMBER, &res.INSTANCE_NAME, &res.HOST_NAME, &res.VERSION, &res.STARTUP_TIME,
+		err := rows.Scan(&res.INSTANCE_NUMBER, &res.INSTANCE_NAME, &res.HOST_NAME, &res.VERSION, &res.STARTUP_TIME,
 			&res.STATUS, &res.PARALLEL, &res.THREAD_NO, &res.ARCHIVER, &res.LOG_SWITCH_WAIT, &res.LOGINS,
 			&res.SHUTDOWN_PENDING, &res.DATABASE_STATUS, &res.INSTANCE_ROLE, &res.ACTIVE_STATE, &res.BLOCKED, &res.CON_ID,
 			&res.INSTANCE_MODE, &res.EDITION, &res.FAMILY, &res.DATABASE_TYPE)
@@ -322,7 +362,20 @@ func runInstanceMetrics(query string, db *sql.DB) []instance {
 		if err != nil {
 			glog.Error(err)
 		}
-
 	}
-	return result
+	return result,nil
+}
+
+func convertQuery(v string,useRAC bool) string{
+	var query string = v
+	result := strings.Split(v, "%sv$")
+	if len(result) == 1 {
+	    return v
+	}
+	if useRAC {
+		query = strings.Join(result, "gv$")
+	}else{
+		query = strings.Join(result,"v$")
+	}
+	return query
 }
